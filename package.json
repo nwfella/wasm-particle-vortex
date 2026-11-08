@@ -1,0 +1,23 @@
+{
+  "name": "wasm-particle-vortex",
+  "version": "1.0.0",
+  "description": "500,000 particles swirling in a toroidal vortex — all physics (flow field, spatial grid hash, density pressure, mouse repulsion) in an 8 KB hand-written WebAssembly module, rendered as WebGL2 point sprites in one HTML file.",
+  "keywords": ["webassembly", "wasm", "particles", "webgl2", "simulation", "assemblyscript", "spatial-hash", "single-file"],
+  "license": "MIT",
+  "author": "nwfella",
+  "repository": { "type": "git", "url": "https://github.com/nwfella/wasm-particle-vortex.git" },
+  "homepage": "https://nwfella.github.io/wasm-particle-vortex/",
+  "type": "commonjs",
+  "scripts": {
+    "build": "node scripts/build.js",
+    "verify": "node scripts/verify_wasm.js",
+    "verify:browser": "node scripts/browser_check.js",
+    "verify:all": "node scripts/verify_wasm.js && node scripts/browser_check.js",
+    "bench": "node scripts/bench.js 500000 3",
+    "shot": "node scripts/shot.js",
+    "serve": "node -e \"const h=require('http'),f=require('fs');h.createServer((q,s)=>{s.writeHead(200,{'content-type':'text/html'});s.end(f.readFileSync('index.html'))}).listen(8080,()=>console.log('http://127.0.0.1:8080'))\""
+  },
+  "devDependencies": {
+    "assemblyscript": "^0.28.20"
+  }
+}

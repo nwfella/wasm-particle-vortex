@@ -1,0 +1,4 @@
+node_modules/
+*.log
+screenshots/tune*.png
+screenshots/shot.png

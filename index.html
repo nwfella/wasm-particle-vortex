@@ -1,0 +1,825 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="color-scheme" content="dark">
+<title>Toroidal Vortex — 500,000 particles in WebAssembly</title>
+<meta name="description" content="A real-time toroidal vortex of 500,000 particles. All physics — flow field, spatial grid hashing, density pressure, mouse repulsion — runs in a hand-written WebAssembly module, rendered with WebGL2 point sprites.">
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Ccircle cx='16' cy='16' r='11' fill='none' stroke='%2347c6ff' stroke-width='3'/%3E%3Ccircle cx='16' cy='16' r='4' fill='%23ff5fa2'/%3E%3C/svg%3E">
+<style>
+  :root{
+    --bg:#05060b; --ink:#e8edf7; --dim:#8d97ad; --line:rgba(255,255,255,.10);
+    --glass:rgba(12,15,26,.62); --cyan:#47c6ff; --pink:#ff5fa2; --amber:#ffb347;
+    --mono:ui-monospace,"SF Mono",SFMono-Regular,Menlo,Consolas,"Liberation Mono",monospace;
+    --sans:system-ui,-apple-system,"Segoe UI",Inter,Roboto,Helvetica,Arial,sans-serif;
+  }
+  *{box-sizing:border-box;margin:0;padding:0}
+  html,body{height:100%}
+  body{
+    background:var(--bg); color:var(--ink); font-family:var(--sans);
+    overflow:hidden; overscroll-behavior:none; -webkit-font-smoothing:antialiased;
+    text-rendering:optimizeLegibility;
+  }
+  #gl{position:fixed; inset:0; width:100%; height:100%; display:block; touch-action:none}
+
+  /* ── overlay ─────────────────────────────────────────────────────────── */
+  #hud{position:fixed; inset:0; pointer-events:none; z-index:2;
+       display:flex; flex-direction:column; justify-content:space-between;
+       padding:clamp(14px,2.2vw,28px)}
+  .row{display:flex; justify-content:space-between; align-items:flex-start; gap:16px}
+  .row.bottom{align-items:flex-end}
+
+  /* title block */
+  #brand{max-width:min(52ch,60vw)}
+  h1{font-size:clamp(15px,1.5vw,19px); font-weight:650; letter-spacing:.16em;
+     text-transform:uppercase; line-height:1.15; white-space:nowrap}
+  h1 em{font-style:normal; color:var(--cyan)}
+  #brand p{margin-top:7px; font-size:clamp(11px,1.1vw,12.5px); color:var(--dim);
+           line-height:1.55; max-width:46ch}
+  #brand p b{color:#b9c4d8; font-weight:600}
+  #badge{display:inline-flex; align-items:center; gap:6px; margin-top:11px;
+         font:600 10px/1 var(--mono); letter-spacing:.13em; text-transform:uppercase;
+         color:#9fe8ff; border:1px solid rgba(71,198,255,.32);
+         background:rgba(71,198,255,.07); padding:6px 9px; border-radius:99px}
+  #badge i{width:5px; height:5px; border-radius:99px; background:var(--cyan);
+           box-shadow:0 0 8px var(--cyan); animation:pulse 2.4s ease-in-out infinite}
+  @keyframes pulse{0%,100%{opacity:1}50%{opacity:.25}}
+
+  /* stats */
+  #stats{display:grid; grid-template-columns:auto auto; gap:3px 14px;
+         text-align:right; font-family:var(--mono); font-size:11.5px;
+         background:var(--glass); border:1px solid var(--line); border-radius:12px;
+         padding:11px 14px; backdrop-filter:blur(14px); -webkit-backdrop-filter:blur(14px)}
+  #stats dt{color:var(--dim); letter-spacing:.02em}
+  #stats dd{color:var(--ink); font-variant-numeric:tabular-nums; font-weight:500}
+  #stats dd.hi{color:var(--cyan)}
+  #stats dd.warn{color:var(--amber)}
+
+  /* controls */
+  #panel{pointer-events:auto; background:var(--glass); border:1px solid var(--line);
+         border-radius:14px; padding:13px 15px 14px; backdrop-filter:blur(16px);
+         -webkit-backdrop-filter:blur(16px); width:min(330px,calc(100vw - 28px))}
+  #panel .head{display:flex; align-items:center; justify-content:space-between;
+               gap:10px; margin-bottom:11px}
+  #panel .head span{font:600 9.5px/1 var(--mono); letter-spacing:.16em;
+                    text-transform:uppercase; color:var(--dim)}
+  .seg{display:flex; gap:3px; background:rgba(255,255,255,.05); border-radius:8px; padding:3px}
+  .seg button{pointer-events:auto; border:0; background:transparent; color:var(--dim);
+              font:600 10px/1 var(--mono); padding:5px 7px; border-radius:6px;
+              cursor:pointer; letter-spacing:.02em; transition:background .12s,color .12s}
+  .seg button:hover{color:var(--ink)}
+  .seg button[aria-pressed="true"]{background:rgba(71,198,255,.16); color:#bdefff}
+  #reset{border:1px solid var(--line); background:transparent; color:var(--dim);
+         font:600 10px/1 var(--mono); padding:6px 9px; border-radius:7px; cursor:pointer;
+         letter-spacing:.06em; text-transform:uppercase; transition:color .12s,border-color .12s}
+  #reset:hover{color:var(--ink); border-color:rgba(255,255,255,.28)}
+
+  .ctl{display:grid; grid-template-columns:1fr auto; align-items:center;
+       gap:2px 8px; margin-top:9px}
+  .ctl label{font-size:11px; color:#aab4c6; letter-spacing:.01em}
+  .ctl output{font:500 10.5px/1 var(--mono); color:var(--cyan);
+              font-variant-numeric:tabular-nums; min-width:34px; text-align:right}
+  .ctl input[type=range]{
+    -webkit-appearance:none; appearance:none; grid-column:1/-1; width:100%; height:16px;
+    background:transparent; cursor:pointer; margin:1px 0 0}
+  .ctl input[type=range]::-webkit-slider-runnable-track{
+    height:2px; border-radius:2px;
+    background:linear-gradient(90deg, rgba(71,198,255,.75) var(--fill,50%), rgba(255,255,255,.13) var(--fill,50%))}
+  .ctl input[type=range]::-moz-range-track{height:2px; border-radius:2px; background:rgba(255,255,255,.13)}
+  .ctl input[type=range]::-moz-range-progress{height:2px; border-radius:2px; background:rgba(71,198,255,.75)}
+  .ctl input[type=range]::-webkit-slider-thumb{
+    -webkit-appearance:none; width:11px; height:11px; border-radius:99px; margin-top:-4.5px;
+    background:#dff6ff; border:1px solid rgba(71,198,255,.9);
+    box-shadow:0 0 10px rgba(71,198,255,.7)}
+  .ctl input[type=range]::-moz-range-thumb{
+    width:10px; height:10px; border-radius:99px; background:#dff6ff;
+    border:1px solid rgba(71,198,255,.9); box-shadow:0 0 10px rgba(71,198,255,.7)}
+  .ctl input[type=range]:focus-visible{outline:2px solid rgba(71,198,255,.55); outline-offset:3px; border-radius:4px}
+
+  /* legend */
+  #legend{text-align:right; font-family:var(--mono); font-size:10px; color:var(--dim);
+          letter-spacing:.06em}
+  #legend .bar{width:150px; height:5px; border-radius:99px; margin:6px 0 5px auto;
+               background:linear-gradient(90deg,#06093a,#0a5ad9,#5933f2,#f2339e,#ff9e38,#fff7e6)}
+  #legend .bar[data-mode="density"]{background:linear-gradient(90deg,#04121a,#0f6b78,#39d0c8,#d9fff6)}
+  #legend .ends{display:flex; justify-content:space-between; width:150px; margin-left:auto}
+  #keys{margin-top:9px; line-height:1.85; font-size:10px; color:#6c778d}
+  #keys kbd{font:inherit; color:#9fb0c8; border:1px solid var(--line);
+            border-bottom-width:2px; border-radius:4px; padding:0 4px; margin-right:2px}
+
+  /* boot */
+  #boot{position:fixed; inset:0; z-index:9; display:grid; place-items:center;
+        background:var(--bg); color:var(--dim); font:12px/1.6 var(--mono);
+        letter-spacing:.1em; text-transform:uppercase; transition:opacity .5s ease}
+  #boot.gone{opacity:0; pointer-events:none}
+  #boot .dot{display:inline-block; width:6px; height:6px; border-radius:99px;
+             background:var(--cyan); margin-right:8px; animation:pulse 1.2s ease-in-out infinite}
+  #boot .err{color:#ff7a7a; text-transform:none; letter-spacing:0; max-width:44ch;
+             text-align:center; font-family:var(--mono)}
+  body.nohud #hud{opacity:0; transform:translateY(6px)}
+  #hud{transition:opacity .25s ease, transform .25s ease}
+
+  @media (max-width:760px){
+    #hud{padding:12px}
+    #brand{max-width:58vw}
+    #brand p{display:none}
+    h1{font-size:13px; letter-spacing:.1em; white-space:normal}
+    h1 br{display:none}
+    #badge{font-size:9px; padding:5px 7px; margin-top:8px}
+    #stats{font-size:10px; padding:8px 10px; gap:2px 10px}
+    #legend{display:none}
+    #panel{width:100%}
+    #panel .head{margin-bottom:8px}
+    .ctl{margin-top:6px}
+  }
+  @media (max-width:520px){
+    /* the sheet scrolls instead of growing past a third of the screen, so the
+       vortex always has the upper band to itself */
+    #panel{max-height:min(38vh,310px); overflow-y:auto; overscroll-behavior:contain}
+    #panel::-webkit-scrollbar{width:0}
+  }
+  @media (max-width:420px){
+    #stats dt:nth-child(n+5),#stats dd:nth-child(n+5){display:none}
+    h1{font-size:12px}
+    .ctl{margin-top:5px}
+  }
+  @media (prefers-reduced-motion:reduce){ #badge i{animation:none} }
+</style>
+</head>
+<body>
+<canvas id="gl" aria-label="Real-time toroidal vortex of 500,000 particles simulated in WebAssembly"></canvas>
+
+<div id="hud">
+  <div class="row">
+    <div id="brand">
+      <h1>Toroidal <em>Vortex</em></h1>
+      <p><b id="tagline">500,000 particles</b> — flow field, spatial grid hash, density
+         pressure and mouse repulsion all solved in a 8 KB WebAssembly module.
+         No libraries.</p>
+      <div id="badge"><i></i>wasm physics · webgl2 sprites</div>
+    </div>
+    <dl id="stats">
+      <dt>fps</dt><dd id="s-fps" class="hi">–</dd>
+      <dt>physics</dt><dd id="s-step">–</dd>
+      <dt>render</dt><dd id="s-draw">–</dd>
+      <dt>particles</dt><dd id="s-count">–</dd>
+      <dt>grid</dt><dd id="s-grid">–</dd>
+      <dt>occupied</dt><dd id="s-occ">–</dd>
+    </dl>
+  </div>
+
+  <div class="row bottom">
+    <div id="panel">
+      <div class="head">
+        <span>Field</span>
+        <div class="seg" role="group" aria-label="Particle count">
+          <button data-count="125000" aria-pressed="false">125k</button>
+          <button data-count="250000" aria-pressed="false">250k</button>
+          <button data-count="500000" aria-pressed="true">500k</button>
+        </div>
+        <button id="reset" title="Reset the simulation (R)">reset</button>
+      </div>
+
+      <div class="ctl">
+        <label for="c-spin">Toroidal swirl</label><output id="o-spin">2.80</output>
+        <input id="c-spin" type="range" min="0" max="6" step="0.05" value="2.8">
+      </div>
+      <div class="ctl">
+        <label for="c-polo">Poloidal circulation</label><output id="o-polo">1.50</output>
+        <input id="c-polo" type="range" min="0" max="4" step="0.05" value="1.5">
+      </div>
+      <div class="ctl">
+        <label for="c-turb">Turbulence</label><output id="o-turb">0.30</output>
+        <input id="c-turb" type="range" min="0" max="2" step="0.05" value="0.3">
+      </div>
+      <div class="ctl">
+        <label for="c-mouse">Mouse force</label><output id="o-mouse">0.60</output>
+        <input id="c-mouse" type="range" min="0" max="2" step="0.05" value="0.6">
+      </div>
+      <div class="ctl">
+        <label for="c-size">Particle size</label><output id="o-size">1.00</output>
+        <input id="c-size" type="range" min="0.3" max="3" step="0.05" value="1">
+      </div>
+    </div>
+
+    <div id="legend">
+      <div>velocity → colour</div>
+      <div class="bar" id="legend-bar" data-mode="speed"></div>
+      <div class="ends"><span>slow</span><span>fast</span></div>
+      <div id="keys">
+        <div><kbd>drag</kbd> orbit · <kbd>wheel</kbd> zoom</div>
+        <div><kbd>space</kbd> pause · <kbd>g</kbd> colour mode · <kbd>r</kbd> reset · <kbd>h</kbd> hud</div>
+      </div>
+    </div>
+  </div>
+</div>
+
+<div id="boot"><div><span class="dot"></span>compiling module…</div></div>
+
+<!--WASM-B64--><script id="wasm-b64" type="text/plain">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</script><!--/WASM-B64-->
+
+<script>
+"use strict";
+(async function () {
+  const $ = (id) => document.getElementById(id);
+  const boot = $("boot");
+  const canvas = $("gl");
+  const fail = (msg) => { boot.classList.remove("gone"); boot.innerHTML = '<div class="err">' + msg + "</div>"; };
+
+  /* ── 1. instantiate the module from the bytes embedded in this document ── */
+  let sim;
+  try {
+    const b64 = $("wasm-b64").textContent.trim();
+    if (!b64) throw new Error("no module payload embedded");
+    const bin = atob(b64);
+    const bytes = new Uint8Array(bin.length);
+    for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
+    const { instance } = await WebAssembly.instantiate(bytes, {
+      env: { abort: (m, f, l, c) => { throw new Error("wasm abort at " + l + ":" + c); } },
+    });
+    sim = instance.exports;
+  } catch (e) {
+    fail("WebAssembly failed: " + (e && e.message ? e.message : e) +
+         "<br><br>This page needs a browser with WebAssembly. Try Chrome, Edge, Firefox or Safari 15+.");
+    return;
+  }
+
+  /* ── 2. WebGL2 ─────────────────────────────────────────────────────────── */
+  const gl = canvas.getContext("webgl2", {
+    alpha: false, antialias: false, depth: false, stencil: false,
+    powerPreference: "high-performance", preserveDrawingBuffer: false,
+  });
+  if (!gl) { fail("WebGL2 is not available in this browser."); return; }
+
+  const VS_BG = `#version 300 es
+  out vec2 vUv;
+  void main(){
+    vec2 p = vec2((gl_VertexID << 1) & 2, gl_VertexID & 2);
+    vUv = p;
+    gl_Position = vec4(p * 2.0 - 1.0, 0.0, 1.0);
+  }`;
+
+  const FS_BG = `#version 300 es
+  precision highp float;
+  in vec2 vUv; out vec4 o;
+  uniform float uAspect;
+  void main(){
+    vec2 p = (vUv - 0.5) * vec2(uAspect, 1.0);
+    float d = length(p);
+    vec3 col = mix(vec3(0.031,0.043,0.086), vec3(0.004,0.005,0.013), smoothstep(0.05, 0.92, d));
+    col += vec3(0.030,0.055,0.105) * exp(-d * 3.1);      /* soft studio glow */
+    col *= 1.0 - 0.42 * smoothstep(0.36, 1.05, d);       /* vignette */
+    col += (fract(sin(dot(vUv, vec2(12.9898,78.233))) * 43758.5453) - 0.5) * 0.006;
+    o = vec4(col, 1.0);
+  }`;
+
+  const VS_PT = `#version 300 es
+  layout(location=0) in vec4 aPos;    /* xyz + speed^2 */
+  layout(location=1) in float aDbg;   /* cell density, normalised */
+  uniform mat4 uProj, uView;
+  uniform float uSize, uPix, uMode;
+  out float vT;
+  out float vFade;
+  void main(){
+    vec4 vp = uView * vec4(aPos.xyz, 1.0);
+    gl_Position = uProj * vp;
+    float z = max(0.16, -vp.z);
+    gl_PointSize = clamp(uSize * uPix / z, 1.0, 26.0);
+    vFade = clamp(2.1 / (z * 1.55 + 0.55), 0.10, 1.35);
+    vT = uMode < 0.5 ? sqrt(clamp(aPos.w * 1.45, 0.0, 1.0)) : aDbg;
+  }`;
+
+  const FS_PT = `#version 300 es
+  precision highp float;
+  in float vT; in float vFade;
+  uniform float uAlpha; uniform float uMode;
+  out vec4 o;
+  vec3 rampSpeed(float t){
+    vec3 c = mix(vec3(0.020,0.045,0.230), vec3(0.035,0.330,0.880), smoothstep(0.00,0.24,t));
+    c = mix(c, vec3(0.320,0.180,0.940), smoothstep(0.20,0.46,t));
+    c = mix(c, vec3(0.940,0.190,0.620), smoothstep(0.44,0.70,t));
+    c = mix(c, vec3(1.000,0.620,0.220), smoothstep(0.68,0.87,t));
+    c = mix(c, vec3(1.000,0.975,0.910), smoothstep(0.85,1.00,t));
+    return c;
+  }
+  vec3 rampDensity(float t){
+    vec3 c = mix(vec3(0.023,0.075,0.110), vec3(0.100,0.620,0.680), smoothstep(0.0,0.6,t));
+    c = mix(c, vec3(0.560,0.960,0.880), smoothstep(0.55,0.88,t));
+    c = mix(c, vec3(0.950,1.000,0.980), smoothstep(0.86,1.00,t));
+    return c;
+  }
+  void main(){
+    vec2 d = gl_PointCoord - 0.5;
+    float r2 = dot(d, d);
+    if (r2 > 0.25) discard;
+    float a = (0.25 - r2) * 4.0;
+    a *= a;                                   /* soft round sprite */
+    vec3 c = uMode < 0.5 ? rampSpeed(clamp(vT,0.0,1.0)) : rampDensity(clamp(vT,0.0,1.0));
+    o = vec4(c * (uAlpha * a * vFade), 1.0);
+  }`;
+
+  function compile(type, src) {
+    const s = gl.createShader(type);
+    gl.shaderSource(s, src);
+    gl.compileShader(s);
+    if (!gl.getShaderParameter(s, gl.COMPILE_STATUS)) {
+      throw new Error((type === gl.VERTEX_SHADER ? "vertex" : "fragment") + " shader: " +
+        gl.getShaderInfoLog(s));
+    }
+    return s;
+  }
+  function program(vs, fs) {
+    const p = gl.createProgram();
+    gl.attachShader(p, compile(gl.VERTEX_SHADER, vs));
+    gl.attachShader(p, compile(gl.FRAGMENT_SHADER, fs));
+    gl.linkProgram(p);
+    if (!gl.getProgramParameter(p, gl.LINK_STATUS)) throw new Error("link: " + gl.getProgramInfoLog(p));
+    const u = {};
+    const n = gl.getProgramParameter(p, gl.ACTIVE_UNIFORMS);
+    for (let i = 0; i < n; i++) {
+      const info = gl.getActiveUniform(p, i);
+      u[info.name] = gl.getUniformLocation(p, info.name);
+    }
+    return { p, u };
+  }
+
+  let bg, pts;
+  try {
+    bg = program(VS_BG, FS_BG);
+    pts = program(VS_PT, FS_PT);
+  } catch (e) { fail("Shader error: " + e.message); return; }
+
+  const vaoEmpty = gl.createVertexArray();
+  const vaoPts = gl.createVertexArray();
+  const vboPos = gl.createBuffer();
+  const vboDbg = gl.createBuffer();
+  gl.bindVertexArray(vaoPts);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
+  gl.enableVertexAttribArray(0);
+  gl.vertexAttribPointer(0, 4, gl.FLOAT, false, 16, 0);
+  gl.bindBuffer(gl.ARRAY_BUFFER, vboDbg);
+  gl.enableVertexAttribArray(1);
+  gl.vertexAttribPointer(1, 1, gl.FLOAT, false, 4, 0);
+  gl.bindVertexArray(null);
+
+  /* ── 3. state ──────────────────────────────────────────────────────────── */
+  const MAXP = sim.getMaxParticles();
+  const state = {
+    count: 500000, paused: false, mode: 0, hud: true,
+    spin: 2.8, polo: 1.5, turb: 0.30, mouseForce: 0.6, size: 1.0,
+  };
+  const DEFAULTS = Object.freeze({ ...state });
+  const cam = { yaw: 0.62, pitch: 0.52, dist: 4.15, tYaw: 0.62, tPitch: 0.52, tDist: 4.15 };
+  const mouse = { inside: false, nx: 0, ny: 0, x: 0, y: 0, z: 0, strength: 0 };
+  const MOUSE_R = 0.62;
+
+  let posView = null, dbgView = null, NV = 0;
+
+  function bindViews() {
+    const buf = sim.memory.buffer;
+    NV = sim.getCount();
+    posView = new Float32Array(buf, sim.posPtr(), NV * 4);
+    dbgView = new Float32Array(buf, sim.dbgPtr(), NV);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
+    gl.bufferData(gl.ARRAY_BUFFER, posView.byteLength, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, vboDbg);
+    gl.bufferData(gl.ARRAY_BUFFER, dbgView.byteLength, gl.DYNAMIC_DRAW);
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+  }
+
+  function pushFlow() { sim.setFlow(state.spin, state.polo, state.turb, 8.0, 10.0, 0.55); }
+
+  function boot0(n) {
+    state.count = Math.min(n, MAXP);
+    sim.init(state.count, 0xc0ffee);
+    sim.setGridInterval(3);
+    sim.setDebug(0);
+    pushFlow();
+    bindViews();
+    lastStats = null;
+    syncControls();
+    refreshStats();
+    paint();
+  }
+
+  /* ── 4. matrices ───────────────────────────────────────────────────────── */
+  const mProj = new Float32Array(16), mView = new Float32Array(16);
+  function perspective(out, fovy, aspect, near, far, shiftY) {
+    const f = 1 / Math.tan(fovy / 2), nf = 1 / (near - far);
+    out.fill(0);
+    out[0] = f / aspect; out[5] = f; out[10] = (far + near) * nf;
+    /* lens shift, not a camera move: y_clip += m9·z makes the ndc offset
+       constant with depth (m13 would be divided by w and vanish at range) */
+    out[9] = -(shiftY || 0);
+    out[11] = -1; out[14] = 2 * far * near * nf;
+  }
+  function lookAt(out, ex, ey, ez, cx, cy, cz) {
+    let zx = ex - cx, zy = ey - cy, zz = ez - cz;
+    let l = 1 / Math.hypot(zx, zy, zz); zx *= l; zy *= l; zz *= l;
+    let xx = zz, xy = 0, xz = -zx;                       /* cross(up=(0,1,0), z) */
+    l = Math.hypot(xx, xy, xz); xx *= l; xy *= l; xz *= l;
+    const yx = zy * xz - zz * xy, yy = zz * xx - zx * xz, yz = zx * xy - zy * xx;
+    out[0] = xx; out[1] = yx; out[2] = zx; out[3] = 0;
+    out[4] = xy; out[5] = yy; out[6] = zy; out[7] = 0;
+    out[8] = xz; out[9] = yz; out[10] = zz; out[11] = 0;
+    out[12] = -(xx * ex + xy * ey + xz * ez);
+    out[13] = -(yx * ex + yy * ey + yz * ez);
+    out[14] = -(zx * ex + zy * ey + zz * ez);
+    out[15] = 1;
+  }
+  /* the ring's world-space bounding radius, plus a little fuzz */
+  const FIT_R = 1.58;
+  const FOVY = 0.80, TANV = Math.tan(FOVY / 2);
+  let effDist = 4.15, effShift = 0;
+
+  /* Pull the camera back until the ring fits the narrow axis, and on portrait
+     push the subject above the control sheet with a lens shift. Without this a
+     390 px phone crops the torus off both edges. */
+  function camFrame() {
+    const aspect = W / H;
+    /* bounding-sphere fit: d = R / sin(half-fov), NOT R / tan(...) — the near
+       side of the ring is what clips first, and it magnifies */
+    const sinV = Math.sin(FOVY / 2);
+    const tanH = TANV * aspect, sinH = tanH / Math.hypot(1, tanH);
+    const dV = FIT_R / sinV;
+    const dH = FIT_R / Math.hypot(sinH, 1e-6);
+    const portrait = aspect < 0.95;
+    effDist = Math.max(cam.dist, portrait ? Math.max(dH, dV * 0.55) : dH) * (portrait ? 1.10 : 1);
+    /* centre the subject in the band above the sheet rather than in the screen */
+    const band = Math.min(1, (bandTopPx / DPR) / (H / DPR) || 0.72);
+    effShift = portrait ? Math.max(0, Math.min(0.40, (1 - band) * 1.06)) : 0;
+  }
+  function camEye() {
+    const cp = Math.cos(cam.pitch), sp = Math.sin(cam.pitch);
+    return [effDist * cp * Math.sin(cam.yaw), effDist * sp, effDist * cp * Math.cos(cam.yaw)];
+  }
+
+  /* cursor → world position on the plane through the origin facing the camera */
+  function cursorWorld() {
+    const eye = camEye();
+    const fwd = [-eye[0], -eye[1], -eye[2]];
+    const fl = 1 / Math.hypot(fwd[0], fwd[1], fwd[2]);
+    fwd[0] *= fl; fwd[1] *= fl; fwd[2] *= fl;
+    let rx = fwd[2], ry = 0, rz = -fwd[0];
+    const rl = 1 / (Math.hypot(rx, ry, rz) || 1); rx *= rl; ry *= rl; rz *= rl;
+    const ux = ry * fwd[2] - rz * fwd[1], uy = rz * fwd[0] - rx * fwd[2], uz = rx * fwd[1] - ry * fwd[0];
+    const tanH = Math.tan(0.5 * 0.80) * (canvas.width / canvas.height);
+    const dx = fwd[0] + (rx * mouse.nx + ux * mouse.ny) * tanH;
+    const dy = fwd[1] + (ry * mouse.nx + uy * mouse.ny) * tanH;
+    const dz = fwd[2] + (rz * mouse.nx + uz * mouse.ny) * tanH;
+    const dd = fwd[0] * dx + fwd[1] * dy + fwd[2] * dz;
+    const t = effDist / (Math.abs(dd) < 1e-4 ? 1e-4 : dd);
+    return [eye[0] + dx * t, eye[1] + dy * t, eye[2] + dz * t];
+  }
+
+  /* ── 5. render ─────────────────────────────────────────────────────────── */
+  let W = 1, H = 1, DPR = 1;
+  let bandTopPx = 0;
+  function resize() {
+    DPR = Math.min(window.devicePixelRatio || 1, 2);
+    const w = Math.max(1, Math.round(canvas.clientWidth * DPR));
+    const h = Math.max(1, Math.round(canvas.clientHeight * DPR));
+    /* the control sheet's top edge, in device pixels: the free band above it is
+       where the subject has to live on a portrait screen */
+    bandTopPx = $("panel").getBoundingClientRect().top * DPR;
+    if (w === W && h === H) return false;
+    W = canvas.width = w; H = canvas.height = h;
+    return true;
+  }
+
+  let skipPoints = false;
+  function draw() {
+    gl.viewport(0, 0, W, H);
+    gl.disable(gl.DEPTH_TEST);
+    gl.disable(gl.BLEND);
+    gl.clearColor(0.02, 0.024, 0.043, 1);
+    gl.clear(gl.COLOR_BUFFER_BIT);
+
+    gl.useProgram(bg.p);
+    gl.uniform1f(bg.u.uAspect, W / H);
+    gl.bindVertexArray(vaoEmpty);
+    gl.drawArrays(gl.TRIANGLES, 0, 3);
+
+    camFrame();
+    perspective(mProj, FOVY, W / H, 0.05, 30, effShift);
+    const e = camEye();
+    lookAt(mView, e[0], e[1], e[2], 0, 0, 0);
+
+    gl.useProgram(pts.p);
+    gl.uniformMatrix4fv(pts.u.uProj, false, mProj);
+    gl.uniformMatrix4fv(pts.u.uView, false, mView);
+    gl.uniform1f(pts.u.uPix, 0.5 * H / Math.tan(0.40));
+    gl.uniform1f(pts.u.uSize, state.size * DPR * 0.0170);
+    gl.uniform1f(pts.u.uMode, state.mode);
+    gl.uniform1f(pts.u.uAlpha, state.mode === 0 ? 0.165 : 0.125);
+    if (skipPoints) { gl.bindVertexArray(null); gl.disable(gl.BLEND); return; }
+    gl.enable(gl.BLEND);
+    gl.blendFunc(gl.ONE, gl.ONE);
+    gl.bindVertexArray(vaoPts);
+    gl.drawArrays(gl.POINTS, 0, NV);
+    gl.bindVertexArray(null);
+    gl.disable(gl.BLEND);
+  }
+
+  /* ── 6. the loop ───────────────────────────────────────────────────────── */
+  let tSim = 0, last = 0, raf = 0;
+  let smStep = 16, smDraw = 6, fps = 0, fpsAcc = 0, fpsN = 0, fpsT = 0;
+  let lastStats = null;
+
+  function stepOnce(dt) {
+    const t0 = performance.now();
+    const mw = mouse.inside ? cursorWorld() : [0, 0, 0];
+    mouse.x = mw[0]; mouse.y = mw[1]; mouse.z = mw[2];
+    sim.setMouse(mw[0], mw[1], mw[2], MOUSE_R, mouse.strength);
+    sim.step(dt, tSim);
+    tSim += dt;
+    const t1 = performance.now();
+    gl.bindBuffer(gl.ARRAY_BUFFER, vboPos);
+    gl.bufferSubData(gl.ARRAY_BUFFER, 0, posView);
+    if (state.mode !== 0) {
+      gl.bindBuffer(gl.ARRAY_BUFFER, vboDbg);
+      gl.bufferSubData(gl.ARRAY_BUFFER, 0, dbgView);
+    }
+    gl.bindBuffer(gl.ARRAY_BUFFER, null);
+    return (t1 - t0) + (performance.now() - t1);
+  }
+
+  function frame(now) {
+    raf = requestAnimationFrame(frame);
+    const dtReal = last ? Math.min(0.05, (now - last) / 1000) : 1 / 60;
+    last = now;
+    resize();
+
+    /* ease the camera toward its target so drags feel weighted */
+    const k = 1 - Math.pow(0.0025, dtReal);
+    cam.yaw += (cam.tYaw - cam.yaw) * k;
+    cam.pitch += (cam.tPitch - cam.pitch) * k;
+    cam.dist += (cam.tDist - cam.dist) * k;
+    if (!dragging && !state.paused) cam.tYaw += dtReal * 0.055;
+
+    /* the cursor's repulsion fades in/out instead of snapping */
+    const want = mouse.inside ? state.mouseForce : 0;
+    mouse.strength += (want - mouse.strength) * Math.min(1, dtReal * 9);
+
+    let step = 0;
+    if (!state.paused) {
+      step = stepOnce(Math.min(0.033, dtReal));
+      smStep += (step - smStep) * 0.15;
+    }
+    const d0 = performance.now();
+    draw();
+    smDraw += (performance.now() - d0 - smDraw) * 0.15;
+
+    fpsAcc += dtReal; fpsN++;
+    if (fpsAcc >= 0.25) { fps = fpsN / fpsAcc; fpsAcc = 0; fpsN = 0; paint(); }
+  }
+
+  /* ── 7. readouts ───────────────────────────────────────────────────────── */
+  function addressablePanelTop() {
+    const p = $("panel").getBoundingClientRect();
+    return p.top / window.innerHeight;
+  }
+  function fmtMs(v) { return v.toFixed(1) + " ms"; }
+  function paint() {
+    if (state.paused) { $("s-fps").textContent = "paused"; $("s-fps").className = "warn"; }
+    else {
+      $("s-fps").textContent = fps ? fps.toFixed(0) : "–";
+      $("s-fps").className = fps && fps < 30 ? "warn" : "hi";
+    }
+    $("s-step").textContent = state.paused ? "–" : fmtMs(smStep);
+    $("s-draw").textContent = state.paused ? "–" : fmtMs(smDraw);
+    $("s-count").textContent = NV.toLocaleString("en-US");
+    $("s-grid").textContent = sim.getGridDim() + "³";
+    $("s-occ").textContent = sim.getOccupancy().toLocaleString("en-US");
+    $("tagline").textContent = NV.toLocaleString("en-US") + " particles";
+  }
+
+  function refreshStats() { fps = fps || 60; paint(); }
+
+  /* ── 8. controls ───────────────────────────────────────────────────────── */
+  const SLIDERS = [
+    ["c-spin", "o-spin", "spin", (v) => v.toFixed(2)],
+    ["c-polo", "o-polo", "polo", (v) => v.toFixed(2)],
+    ["c-turb", "o-turb", "turb", (v) => v.toFixed(2)],
+    ["c-mouse", "o-mouse", "mouseForce", (v) => v.toFixed(2)],
+    ["c-size", "o-size", "size", (v) => v.toFixed(2)],
+  ];
+  function syncSlider(el) {
+    const pct = ((el.value - el.min) / (el.max - el.min)) * 100;
+    el.style.setProperty("--fill", pct.toFixed(1) + "%");
+  }
+  /* the single direction of truth: state → controls. Nothing writes state
+     from the DOM except the input handler below. */
+  function syncControls() {
+    for (const [cid, oid, key, fmt] of SLIDERS) {
+      const el = $(cid);
+      el.value = state[key];
+      syncSlider(el);
+      $(oid).textContent = fmt(state[key]);
+    }
+    for (const b of document.querySelectorAll(".seg button")) {
+      b.setAttribute("aria-pressed", String(+b.dataset.count === state.count));
+    }
+  }
+  for (const [cid, oid, key, fmt] of SLIDERS) {
+    const el = $(cid), out = $(oid);
+    syncSlider(el);
+    out.textContent = fmt(parseFloat(el.value));
+    el.addEventListener("input", () => {
+      const v = parseFloat(el.value);
+      state[key] = v;
+      out.textContent = fmt(v);
+      syncSlider(el);
+      if (key === "spin" || key === "polo" || key === "turb") pushFlow();
+    });
+  }
+
+  for (const b of document.querySelectorAll(".seg button")) {
+    b.addEventListener("click", () => {
+      const n = parseInt(b.dataset.count, 10);
+      for (const o of document.querySelectorAll(".seg button")) {
+        o.setAttribute("aria-pressed", String(o === b));
+      }
+      boot0(n);
+    });
+  }
+  $("reset").addEventListener("click", () => { sim.reset(); tSim = 0; paint(); });
+
+  /* pointer: drag orbits, hover repels */
+  let dragging = false, px = 0, py = 0, moved = 0;
+  canvas.addEventListener("pointerdown", (e) => {
+    dragging = true; moved = 0; px = e.clientX; py = e.clientY;
+    canvas.setPointerCapture(e.pointerId);
+  });
+  canvas.addEventListener("pointermove", (e) => {
+    const r = canvas.getBoundingClientRect();
+    mouse.inside = true;
+    mouse.nx = ((e.clientX - r.left) / r.width) * 2 - 1;
+    mouse.ny = 1 - ((e.clientY - r.top) / r.height) * 2;
+    if (dragging) {
+      const dx = e.clientX - px, dy = e.clientY - py;
+      px = e.clientX; py = e.clientY; moved += Math.abs(dx) + Math.abs(dy);
+      cam.tYaw -= dx * 0.006;
+      cam.tPitch = Math.max(-1.35, Math.min(1.35, cam.tPitch + dy * 0.005));
+    }
+  });
+  const release = () => { dragging = false; };
+  canvas.addEventListener("pointerup", release);
+  canvas.addEventListener("pointercancel", release);
+  canvas.addEventListener("pointerleave", () => { mouse.inside = false; dragging = false; });
+  canvas.addEventListener("wheel", (e) => {
+    e.preventDefault();
+    cam.tDist = Math.max(1.9, Math.min(11, cam.tDist * (1 + Math.sign(e.deltaY) * 0.09)));
+  }, { passive: false });
+  canvas.addEventListener("dblclick", () => { cam.tDist = 4.15; });
+
+  addEventListener("keydown", (e) => {
+    const k = e.key.toLowerCase();
+    if (k === " ") { e.preventDefault(); state.paused = !state.paused; paint(); }
+    else if (k === "r") { sim.reset(); tSim = 0; }
+    else if (k === "g") { setMode((state.mode + 1) % 2); }
+    else if (k === "h") { state.hud = !state.hud; document.body.classList.toggle("nohud", !state.hud); }
+  });
+
+  function setMode(m) {
+    state.mode = m;
+    sim.setDebug(m === 1 ? 1 : 0);
+    $("legend-bar").dataset.mode = m === 0 ? "speed" : "density";
+    $("legend").firstElementChild.textContent = m === 0 ? "velocity → colour" : "cell occupancy → colour";
+    $("legend").querySelector(".ends").innerHTML =
+      m === 0 ? "<span>slow</span><span>fast</span>"
+              : "<span>empty</span><span>crowded</span>";
+    $("badge").lastChild.nodeValue = m === 0 ? "wasm physics · webgl2 sprites"
+                                             : "wasm physics · grid hash → colour";
+  }
+
+  addEventListener("resize", () => { if (resize()) draw(); });
+
+  /* ── 9. go ─────────────────────────────────────────────────────────────── */
+  try {
+    resize();
+    boot0(500000);
+  } catch (e) {
+    fail("Simulation failed to start: " + e.message);
+    return;
+  }
+  boot.classList.add("gone");
+  setTimeout(() => boot.remove(), 700);
+  last = 0;
+  raf = requestAnimationFrame(frame);
+
+  /* ── 10. test hook (the browser gate drives only this) ─────────────────── */
+  window.Vortex = {
+    sim, gl, canvas, state, cam,
+    setState(patch) {
+      Object.assign(state, patch);
+      if ("spin" in patch || "polo" in patch || "turb" in patch) pushFlow();
+      if ("mode" in patch) setMode(patch.mode);
+      if ("count" in patch) boot0(patch.count);
+      syncControls();
+      paint();
+    },
+    setCamera(yaw, pitch, dist) {
+      cam.yaw = cam.tYaw = yaw; cam.pitch = cam.tPitch = pitch; cam.dist = cam.tDist = dist;
+      draw();
+    },
+    step(dt) { const ms = stepOnce(dt == null ? 1 / 60 : dt); paint(); return ms; },
+    drawNow() { resize(); draw(); },
+    pointer(nx, ny) { mouse.inside = true; mouse.nx = nx; mouse.ny = ny; mouse.strength = state.mouseForce; return cursorWorld(); },
+    pause(v) { state.paused = !!v; paint(); },
+    defaults: DEFAULTS,
+    restoreDefaults() {
+      Object.assign(state, DEFAULTS);
+      syncControls(); pushFlow(); setMode(0); paint();
+    },
+    controls() {
+      const o = {};
+      for (const [cid, oid, key] of SLIDERS) o[key] = { input: parseFloat($(cid).value), shown: $(oid).textContent };
+      o.pressed = [...document.querySelectorAll(".seg button")].filter((b) => b.getAttribute("aria-pressed") === "true").map((b) => +b.dataset.count);
+      return o;
+    },
+    reset() { sim.reset(); tSim = 0; },
+    stats() {
+      return {
+        fps, stepMs: smStep, drawMs: smDraw, count: NV, grid: sim.getGridDim(),
+        occupancy: sim.getOccupancy(), mode: state.mode, paused: state.paused,
+        nan: sim.nanCount(), escapes: sim.getEscapes(), frame: sim.getFrame(),
+        meanSpeed2: sim.meanSpeed2(), meanTubeRadius: sim.meanTubeRadius(),
+        outside: sim.escapeFraction(), maxCoord: sim.maxAbsCoord(),
+        verifyGrid: sim.verifyGrid(), targetDensity: sim.getTargetDensity(),
+      };
+    },
+    dom() {
+      const t = (id) => $(id).textContent;
+      return {
+        fps: t("s-fps"), step: t("s-step"), draw: t("s-draw"),
+        count: t("s-count"), grid: t("s-grid"), occ: t("s-occ"),
+        tagline: t("tagline"), legend: $("legend").firstElementChild.textContent,
+        mode: state.mode, paused: state.paused,
+      };
+    },
+    frame() { return { dist: effDist, shift: effShift, aspect: W / H }; },
+    /* ink bounding box + edge coverage: proves the subject is FRAMED, not cropped.
+       The scene has a gradient background, so "ink" is measured as the difference
+       from the same frame drawn with the point pass disabled. */
+    bbox() {
+      resize();
+      const w = canvas.width, h = canvas.height;
+      const grab = () => {
+        draw();
+        const px = new Uint8Array(w * h * 4);
+        gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+        return px;
+      };
+      skipPoints = true;  const bgp = grab();
+      skipPoints = false; const fgp = grab();
+      let x0 = w, y0 = h, x1 = -1, y1 = -1, edge = 0, total = 0;
+      const strip = Math.max(2, Math.round(w * 0.012));
+      for (let y = 0; y < h; y++) {
+        for (let x = 0; x < w; x++) {
+          const i = (y * w + x) * 4;
+          const d = (fgp[i] - bgp[i]) + (fgp[i + 1] - bgp[i + 1]) + (fgp[i + 2] - bgp[i + 2]);
+          if (d <= 14) continue;
+          total++;
+          if (x < x0) x0 = x; if (x > x1) x1 = x;
+          if (y < y0) y0 = y; if (y > y1) y1 = y;
+          if (x < strip || x > w - strip || y < strip || y > h - strip) edge++;
+        }
+      }
+      if (total === 0) return { empty: true };
+      return {
+        empty: false,
+        left: x0 / w, right: 1 - (x1 + 1) / w,
+        top: 1 - (y1 + 1) / h, bottom: y0 / h,
+        edgeFrac: edge / total, inkFrac: total / (w * h),
+        rows: (() => { const b = new Array(16).fill(0);
+          for (let y = 0; y < h; y++) for (let x = 0; x < w; x++) {
+            const i = (y * w + x) * 4;
+            if ((fgp[i]-bgp[i])+(fgp[i+1]-bgp[i+1])+(fgp[i+2]-bgp[i+2]) > 14) b[15 - (y * 16 / h | 0)]++;
+          } return b; })(),
+        screenBottom: 1 - y0 / h,          /* distance from the TOP of the viewport */
+        panelTop: addressablePanelTop(),
+      };
+    },
+    pixels() {
+      resize(); draw();                       /* readPixels needs a fresh frame */
+      const w = canvas.width, h = canvas.height;
+      const px = new Uint8Array(w * h * 4);
+      gl.readPixels(0, 0, w, h, gl.RGBA, gl.UNSIGNED_BYTE, px);
+      let lit = 0, sum = 0, max = 0, r = 0, g = 0, b = 0;
+      for (let i = 0; i < px.length; i += 4) {
+        const v = px[i] + px[i + 1] + px[i + 2];
+        sum += v; r += px[i]; g += px[i + 1]; b += px[i + 2];
+        if (v > 40) lit++;
+        if (v > max) max = v;
+      }
+      return { w, h, litFrac: lit / (w * h), mean: sum / (w * h * 3), max, r, g, b };
+    },
+  };
+})().catch((e) => {
+  document.getElementById("boot").innerHTML = '<div class="err">' + (e && e.message ? e.message : e) + "</div>";
+});
+</script>
+</body>
+</html>
